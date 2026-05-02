@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-# 資料夾批量複製工具 - GUI版
-import shutil, os, datetime, sys, threading
+# 資料夾批量複製工具 - GUI版（網路斷線自動重試）
+import shutil, os, datetime, sys, threading, time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -164,6 +164,7 @@ class CopyToolApp:
 
             copied = 0
             failed = 0
+            failed_items = []
 
             for i, (name, reason) in enumerate(todo):
                 if self.stop_flag:
@@ -180,35 +181,101 @@ class CopyToolApp:
                     self.progress_label.config(text=f"{nu}/{total} ({round(nu/total*100,1)}%) [{r}]")
                 ))
 
-                try:
-                    # 如果目標已存在但不完整，先刪除再重新複製
-                    if os.path.exists(d):
-                        if os.path.isdir(d):
-                            shutil.rmtree(d)
-                        else:
-                            os.remove(d)
+                max_retries = 5
+                success = False
+                for attempt in range(max_retries):
+                    if self.stop_flag:
+                        break
+                    try:
+                        # 如果目標已存在但不完整，先刪除再重新複製
+                        if os.path.exists(d):
+                            if os.path.isdir(d):
+                                shutil.rmtree(d)
+                            else:
+                                os.remove(d)
 
-                    if os.path.isdir(s):
-                        shutil.copytree(s, d)
-                    else:
-                        shutil.copy2(s, d)
+                        if os.path.isdir(s):
+                            shutil.copytree(s, d)
+                        else:
+                            shutil.copy2(s, d)
+                        success = True
+                        break
+                    except Exception as e:
+                        last_err = str(e)
+                        if attempt < max_retries - 1:
+                            wait = [10, 30, 60, 120][min(attempt, 3)]
+                            self.root.after(0, lambda n=name, a=attempt+1, w=wait, err=last_err: (
+                                self.log(f"網路錯誤 ({n}): {err}"),
+                                self.log(f"等待 {w} 秒後第 {a+1} 次重試..."),
+                                self.status_label.config(text=f"等待重連 ({w}秒)...", foreground="orange")
+                            ))
+                            # 可中斷的等待
+                            for _ in range(wait):
+                                if self.stop_flag:
+                                    break
+                                time.sleep(1)
+
+                if success:
                     copied += 1
                     cur = skipped + copied + failed
                     self.root.after(0, lambda n=name, c=cur, r=reason: (
                         self.log(f"OK ({c}/{total}) {n} [{r}]"),
-                        self.progress.configure(value=c)
+                        self.progress.configure(value=c),
+                        self.status_label.config(text=f"({c}/{total}) {n}", foreground="blue")
                     ))
-                except Exception as e:
+                elif not self.stop_flag:
                     failed += 1
+                    failed_items.append(name)
                     cur = skipped + copied + failed
-                    self.root.after(0, lambda n=name, err=str(e), c=cur: (
-                        self.log(f"FAIL ({c}/{total}) {n}: {err}"),
+                    self.root.after(0, lambda n=name, err=last_err, c=cur: (
+                        self.log(f"FAIL ({c}/{total}) {n}: {err} (已重試{max_retries}次)"),
                         self.progress.configure(value=c)
                     ))
+
+            # 最後再重試所有失敗的項目
+            if failed_items and not self.stop_flag:
+                self.root.after(0, lambda: self.log("-" * 50))
+                self.root.after(0, lambda f=len(failed_items): self.log(f"等待 60 秒後重試 {f} 個失敗項目..."))
+                for _ in range(60):
+                    if self.stop_flag:
+                        break
+                    time.sleep(1)
+
+                retry_ok = 0
+                for name in list(failed_items):
+                    if self.stop_flag:
+                        break
+                    s = os.path.join(src, name)
+                    d = os.path.join(dst, name)
+                    self.root.after(0, lambda n=name: self.log(f"重試: {n} ..."))
+                    try:
+                        if os.path.exists(d):
+                            if os.path.isdir(d):
+                                shutil.rmtree(d)
+                            else:
+                                os.remove(d)
+                        if os.path.isdir(s):
+                            shutil.copytree(s, d)
+                        else:
+                            shutil.copy2(s, d)
+                        retry_ok += 1
+                        failed_items.remove(name)
+                        self.root.after(0, lambda n=name: self.log(f"重試成功: {n}"))
+                    except Exception as e:
+                        self.root.after(0, lambda n=name, err=str(e): self.log(f"重試仍失敗: {n}: {err}"))
+
+                if retry_ok > 0:
+                    copied += retry_ok
+                    failed -= retry_ok
+                    self.root.after(0, lambda r=retry_ok: self.log(f"重試成功: {r} 個"))
 
             if not self.stop_flag:
                 msg = f"完成! 本次複製: {copied} | 跳過: {skipped} | 失敗: {failed} | 總共: {total}"
                 self.root.after(0, lambda m=msg: self.log(m))
+                if failed_items:
+                    self.root.after(0, lambda: self.log("仍然失敗的項目:"))
+                    for fn in failed_items:
+                        self.root.after(0, lambda n=fn: self.log(f"  - {n}"))
 
         except Exception as e:
             self.root.after(0, lambda: self.log(f"錯誤: {e}"))
