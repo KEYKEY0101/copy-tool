@@ -100,29 +100,72 @@ class CopyToolApp:
         self.btn_stop.config(state='disabled')
         self.status_label.config(text="正在停止...", foreground="orange")
 
+    def count_files(self, path):
+        """遞迴計算資料夾內所有檔案數量"""
+        count = 0
+        try:
+            for root_dir, dirs, files in os.walk(path):
+                count += len(files)
+        except Exception:
+            pass
+        return count
+
+    def needs_copy(self, src_path, dst_path):
+        """檢查是否需要複製：不存在或子資料夾檔案數量不一致"""
+        if not os.path.exists(dst_path):
+            return True, "新項目"
+        if os.path.isdir(src_path) and os.path.isdir(dst_path):
+            src_count = self.count_files(src_path)
+            dst_count = self.count_files(dst_path)
+            if dst_count < src_count:
+                return True, f"不完整 ({dst_count}/{src_count} 個檔案)"
+        return False, "已完成"
+
     def copy_worker(self, src, dst):
         try:
             os.makedirs(dst, exist_ok=True)
             all_items = sorted(os.listdir(src))
-            done = set(os.listdir(dst))
-            todo = [x for x in all_items if x not in done]
             total = len(all_items)
 
             self.root.after(0, lambda: self.log(f"來源: {src}"))
             self.root.after(0, lambda: self.log(f"目標: {dst}"))
-            self.root.after(0, lambda: self.log(f"總共: {total} | 已完成: {len(done)} | 剩餘: {len(todo)}"))
+            self.root.after(0, lambda: self.log(f"總共: {total} 個項目，正在檢查子資料夾..."))
+            self.root.after(0, lambda: self.progress.configure(maximum=total, value=0))
+
+            # 檢查每個項目，包含子資料夾內容比對
+            todo = []
+            skipped = 0
+            for i, name in enumerate(all_items):
+                s = os.path.join(src, name)
+                d = os.path.join(dst, name)
+                need, reason = self.needs_copy(s, d)
+                if need:
+                    todo.append((name, reason))
+                else:
+                    skipped += 1
+                if (i + 1) % 50 == 0:
+                    self.root.after(0, lambda v=i+1: (
+                        self.progress.configure(value=v),
+                        self.progress_label.config(text=f"檢查中... {v}/{total}")
+                    ))
+
+            self.root.after(0, lambda: self.log(f"已完成: {skipped} | 需要複製: {len(todo)}"))
+            if todo:
+                incomplete = [f"{n} ({r})" for n, r in todo if r != "新項目"]
+                if incomplete:
+                    self.root.after(0, lambda: self.log(f"其中不完整需重新複製: {len(incomplete)} 個"))
             self.root.after(0, lambda: self.log("-" * 50))
-            self.root.after(0, lambda: self.progress.configure(maximum=total, value=len(done)))
+            self.root.after(0, lambda: self.progress.configure(maximum=total, value=skipped))
 
             if not todo:
-                self.root.after(0, lambda: self.log("全部已複製完成!"))
+                self.root.after(0, lambda: self.log("全部已複製完成（含子資料夾檢查）!"))
                 self.root.after(0, self.copy_finished)
                 return
 
             copied = 0
             failed = 0
 
-            for i, name in enumerate(todo):
+            for i, (name, reason) in enumerate(todo):
                 if self.stop_flag:
                     msg = f"已停止。本次複製: {copied} | 失敗: {failed}"
                     self.root.after(0, lambda m=msg: self.log(m))
@@ -130,34 +173,41 @@ class CopyToolApp:
 
                 s = os.path.join(src, name)
                 d = os.path.join(dst, name)
-                num = len(done) + copied + failed + 1
+                num = skipped + copied + failed + 1
 
-                self.root.after(0, lambda n=name, nu=num: (
+                self.root.after(0, lambda n=name, nu=num, r=reason: (
                     self.status_label.config(text=f"({nu}/{total}) {n}"),
-                    self.progress_label.config(text=f"{nu}/{total} ({round(nu/total*100,1)}%)")
+                    self.progress_label.config(text=f"{nu}/{total} ({round(nu/total*100,1)}%) [{r}]")
                 ))
 
                 try:
+                    # 如果目標已存在但不完整，先刪除再重新複製
+                    if os.path.exists(d):
+                        if os.path.isdir(d):
+                            shutil.rmtree(d)
+                        else:
+                            os.remove(d)
+
                     if os.path.isdir(s):
                         shutil.copytree(s, d)
                     else:
                         shutil.copy2(s, d)
                     copied += 1
-                    cur = len(done) + copied + failed
-                    self.root.after(0, lambda n=name, c=cur: (
-                        self.log(f"OK ({c}/{total}) {n}"),
+                    cur = skipped + copied + failed
+                    self.root.after(0, lambda n=name, c=cur, r=reason: (
+                        self.log(f"OK ({c}/{total}) {n} [{r}]"),
                         self.progress.configure(value=c)
                     ))
                 except Exception as e:
                     failed += 1
-                    cur = len(done) + copied + failed
+                    cur = skipped + copied + failed
                     self.root.after(0, lambda n=name, err=str(e), c=cur: (
                         self.log(f"FAIL ({c}/{total}) {n}: {err}"),
                         self.progress.configure(value=c)
                     ))
 
             if not self.stop_flag:
-                msg = f"完成! 本次複製: {copied} | 跳過: {len(done)} | 失敗: {failed} | 總共: {total}"
+                msg = f"完成! 本次複製: {copied} | 跳過: {skipped} | 失敗: {failed} | 總共: {total}"
                 self.root.after(0, lambda m=msg: self.log(m))
 
         except Exception as e:
