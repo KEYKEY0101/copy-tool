@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
-# 資料夾批量複製工具 - PowerShell GUI版（網路斷線自動重試）
+# 資料夾批量複製工具 - PowerShell GUI版（先掃描再複製 + 網路斷線自動重試）
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
-$script:copying = $false
 $script:stopFlag = $false
+$script:todoList = @()
 
 # === 主視窗 ===
 $form = New-Object System.Windows.Forms.Form
 $form.Text = "資料夾批量複製工具"
-$form.Size = New-Object System.Drawing.Size(720, 560)
+$form.Size = New-Object System.Drawing.Size(720, 620)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = "FixedSingle"
 $form.MaximizeBox = $false
@@ -51,50 +51,64 @@ $btnDst.Location = New-Object System.Drawing.Point(605, 88)
 $btnDst.Size = New-Object System.Drawing.Size(80, 27)
 $form.Controls.Add($btnDst)
 
-# === 按鈕 ===
-$btnStart = New-Object System.Windows.Forms.Button
-$btnStart.Text = "開始複製"
-$btnStart.Location = New-Object System.Drawing.Point(15, 125)
-$btnStart.Size = New-Object System.Drawing.Size(90, 30)
-$form.Controls.Add($btnStart)
+# === 選項 ===
+$chkDeep = New-Object System.Windows.Forms.CheckBox
+$chkDeep.Text = "深度檢查 (比對子資料夾檔案數量，較慢)"
+$chkDeep.Location = New-Object System.Drawing.Point(15, 120)
+$chkDeep.AutoSize = $true
+$form.Controls.Add($chkDeep)
+
+# === 按鈕列 ===
+$btnScan = New-Object System.Windows.Forms.Button
+$btnScan.Text = "1. 掃描"
+$btnScan.Location = New-Object System.Drawing.Point(15, 148)
+$btnScan.Size = New-Object System.Drawing.Size(90, 30)
+$form.Controls.Add($btnScan)
+
+$btnCopy = New-Object System.Windows.Forms.Button
+$btnCopy.Text = "2. 開始複製"
+$btnCopy.Location = New-Object System.Drawing.Point(115, 148)
+$btnCopy.Size = New-Object System.Drawing.Size(100, 30)
+$btnCopy.Enabled = $false
+$form.Controls.Add($btnCopy)
 
 $btnStop = New-Object System.Windows.Forms.Button
 $btnStop.Text = "停止"
-$btnStop.Location = New-Object System.Drawing.Point(115, 125)
+$btnStop.Location = New-Object System.Drawing.Point(225, 148)
 $btnStop.Size = New-Object System.Drawing.Size(70, 30)
 $btnStop.Enabled = $false
 $form.Controls.Add($btnStop)
 
 $lblStatus = New-Object System.Windows.Forms.Label
 $lblStatus.Text = "就緒"
-$lblStatus.Location = New-Object System.Drawing.Point(550, 132)
-$lblStatus.Size = New-Object System.Drawing.Size(150, 20)
+$lblStatus.Location = New-Object System.Drawing.Point(500, 155)
+$lblStatus.Size = New-Object System.Drawing.Size(200, 20)
 $lblStatus.TextAlign = "MiddleRight"
 $lblStatus.ForeColor = [System.Drawing.Color]::Gray
 $form.Controls.Add($lblStatus)
 
 # === 進度條 ===
 $progressBar = New-Object System.Windows.Forms.ProgressBar
-$progressBar.Location = New-Object System.Drawing.Point(15, 165)
-$progressBar.Size = New-Object System.Drawing.Size(670, 25)
+$progressBar.Location = New-Object System.Drawing.Point(15, 185)
+$progressBar.Size = New-Object System.Drawing.Size(670, 22)
 $form.Controls.Add($progressBar)
 
 $lblProgress = New-Object System.Windows.Forms.Label
 $lblProgress.Text = ""
-$lblProgress.Location = New-Object System.Drawing.Point(15, 193)
-$lblProgress.Size = New-Object System.Drawing.Size(670, 20)
+$lblProgress.Location = New-Object System.Drawing.Point(15, 210)
+$lblProgress.Size = New-Object System.Drawing.Size(670, 18)
 $form.Controls.Add($lblProgress)
 
 # === 日誌 ===
 $lblLog = New-Object System.Windows.Forms.Label
-$lblLog.Text = "複製日誌:"
-$lblLog.Location = New-Object System.Drawing.Point(15, 218)
+$lblLog.Text = "日誌:"
+$lblLog.Location = New-Object System.Drawing.Point(15, 232)
 $lblLog.AutoSize = $true
 $form.Controls.Add($lblLog)
 
 $txtLog = New-Object System.Windows.Forms.TextBox
-$txtLog.Location = New-Object System.Drawing.Point(15, 238)
-$txtLog.Size = New-Object System.Drawing.Size(670, 270)
+$txtLog.Location = New-Object System.Drawing.Point(15, 252)
+$txtLog.Size = New-Object System.Drawing.Size(670, 320)
 $txtLog.Multiline = $true
 $txtLog.ScrollBars = "Vertical"
 $txtLog.ReadOnly = $true
@@ -150,7 +164,7 @@ function Copy-SingleItem($srcPath, $dstPath, $name) {
     return "FAIL"
 }
 
-# === 瀏覽按鈕事件 ===
+# === 瀏覽按鈕 ===
 $btnSrc.Add_Click({
     $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
     $dlg.Description = "選擇來源資料夾"
@@ -171,8 +185,8 @@ $btnStop.Add_Click({
     $lblStatus.ForeColor = [System.Drawing.Color]::Orange
 })
 
-# === 開始複製按鈕 ===
-$btnStart.Add_Click({
+# === 第一步：掃描 ===
+$btnScan.Add_Click({
     $src = $txtSrc.Text.Trim().Trim('"')
     $dst = $txtDst.Text.Trim().Trim('"')
 
@@ -185,81 +199,126 @@ $btnStart.Add_Click({
         return
     }
 
-    $script:copying = $true
     $script:stopFlag = $false
-    $btnStart.Enabled = $false
+    $script:todoList = @()
+    $btnScan.Enabled = $false
+    $btnCopy.Enabled = $false
     $btnStop.Enabled = $true
-    $lblStatus.Text = "複製中..."
+    $lblStatus.Text = "掃描中..."
     $lblStatus.ForeColor = [System.Drawing.Color]::Blue
     $txtLog.Clear()
 
-    # 確保目標存在
     if (-not (Test-Path -LiteralPath $dst)) {
         New-Item -ItemType Directory -Path $dst -Force | Out-Null
     }
 
-    $allItems = Get-ChildItem -LiteralPath $src | Sort-Object Name
-    $total = $allItems.Count
+    $deepCheck = $chkDeep.Checked
 
     Write-Log "來源: $src"
     Write-Log "目標: $dst"
-    Write-Log "總共: $total 個項目，正在檢查子資料夾..."
+    if ($deepCheck) { Write-Log "模式: 深度檢查（比對子資料夾檔案數量）" }
+    else { Write-Log "模式: 快速檢查（只比對資料夾名稱）" }
+    Write-Log "掃描中..."
+    Write-Log ("-" * 50)
 
+    $allItems = Get-ChildItem -LiteralPath $src | Sort-Object Name
+    $total = $allItems.Count
     $progressBar.Minimum = 0
     $progressBar.Maximum = $total
     $progressBar.Value = 0
 
-    # 檢查哪些需要複製
+    $dstItems = @{}
+    if (Test-Path -LiteralPath $dst) {
+        Get-ChildItem -LiteralPath $dst | ForEach-Object { $dstItems[$_.Name] = $true }
+    }
+
     $todo = @()
-    $skippedCount = 0
-    $checkIdx = 0
+    $skipped = 0
+    $idx = 0
+
     foreach ($item in $allItems) {
-        $checkIdx++
+        if ($script:stopFlag) {
+            Write-Log "掃描已停止"
+            break
+        }
+
+        $idx++
         $dPath = Join-Path $dst $item.Name
         $needCopy = $false
         $reason = ""
 
-        if (-not (Test-Path -LiteralPath $dPath)) {
+        if (-not $dstItems.ContainsKey($item.Name)) {
             $needCopy = $true
             $reason = "新項目"
-        } elseif ($item.PSIsContainer) {
+        } elseif ($deepCheck -and $item.PSIsContainer) {
             $srcCount = Count-Files $item.FullName
             $dstCount = Count-Files $dPath
             if ($dstCount -lt $srcCount) {
                 $needCopy = $true
-                $reason = "不完整 ($dstCount/$srcCount 個檔案)"
+                $reason = "不完整 ($dstCount/$srcCount)"
             }
         }
 
         if ($needCopy) {
             $todo += [PSCustomObject]@{ Name=$item.Name; FullName=$item.FullName; Reason=$reason }
+            Write-Log "欠缺: $($item.Name) [$reason]"
         } else {
-            $skippedCount++
+            $skipped++
         }
 
-        if ($checkIdx % 50 -eq 0) {
-            $progressBar.Value = $checkIdx
-            $lblProgress.Text = "檢查中... $checkIdx/$total"
+        if ($idx % 20 -eq 0 -or $idx -eq $total) {
+            $progressBar.Value = $idx
+            $lblProgress.Text = "掃描中... $idx/$total"
             [System.Windows.Forms.Application]::DoEvents()
         }
     }
 
-    Write-Log "已完成: $skippedCount | 需要複製: $($todo.Count)"
-    $incomplete = ($todo | Where-Object { $_.Reason -ne "新項目" }).Count
-    if ($incomplete -gt 0) { Write-Log "其中不完整需重新複製: $incomplete 個" }
-    Write-Log ("-" * 50)
+    if (-not $script:stopFlag) {
+        Write-Log ("-" * 50)
+        Write-Log "掃描完成!"
+        Write-Log "已完成: $skipped | 需要複製: $($todo.Count) | 總共: $total"
 
-    $progressBar.Value = $skippedCount
+        $script:todoList = $todo
+
+        if ($todo.Count -gt 0) {
+            $btnCopy.Enabled = $true
+            $lblStatus.Text = "待複製: $($todo.Count) 個"
+            $lblStatus.ForeColor = [System.Drawing.Color]::DarkOrange
+        } else {
+            $lblStatus.Text = "全部完成!"
+            $lblStatus.ForeColor = [System.Drawing.Color]::Green
+        }
+    }
+
+    $btnScan.Enabled = $true
+    $btnStop.Enabled = $false
+})
+
+# === 第二步：複製 ===
+$btnCopy.Add_Click({
+    $src = $txtSrc.Text.Trim().Trim('"')
+    $dst = $txtDst.Text.Trim().Trim('"')
+    $todo = $script:todoList
 
     if ($todo.Count -eq 0) {
-        Write-Log "全部已複製完成（含子資料夾檢查）!"
-        $lblStatus.Text = "完成"
-        $lblStatus.ForeColor = [System.Drawing.Color]::Green
-        $btnStart.Enabled = $true
-        $btnStop.Enabled = $false
-        $script:copying = $false
+        [System.Windows.Forms.MessageBox]::Show("沒有需要複製的項目，請先掃描", "提示", "OK", "Information")
         return
     }
+
+    $script:stopFlag = $false
+    $btnScan.Enabled = $false
+    $btnCopy.Enabled = $false
+    $btnStop.Enabled = $true
+    $lblStatus.Text = "複製中..."
+    $lblStatus.ForeColor = [System.Drawing.Color]::Blue
+
+    $totalTodo = $todo.Count
+    $progressBar.Minimum = 0
+    $progressBar.Maximum = $totalTodo
+    $progressBar.Value = 0
+
+    Write-Log ("-" * 50)
+    Write-Log "開始複製 $totalTodo 個項目..."
 
     $copied = 0
     $failed = 0
@@ -267,34 +326,32 @@ $btnStart.Add_Click({
 
     foreach ($item in $todo) {
         if ($script:stopFlag) {
-            Write-Log "已停止。本次複製: $copied | 失敗: $failed"
+            Write-Log "已停止。已複製: $copied | 失敗: $failed"
             break
         }
 
         $dPath = Join-Path $dst $item.Name
-        $num = $skippedCount + $copied + $failed + 1
-        $pct = [math]::Round($num / $total * 100, 1)
+        $num = $copied + $failed + 1
+        $pct = [math]::Round($num / $totalTodo * 100, 1)
 
-        $lblStatus.Text = "($num/$total) $($item.Name)"
+        $lblStatus.Text = "($num/$totalTodo) $($item.Name)"
         $lblStatus.ForeColor = [System.Drawing.Color]::Blue
-        $lblProgress.Text = "$num/$total ($pct%) [$($item.Reason)]"
+        $lblProgress.Text = "$num/$totalTodo ($pct%) [$($item.Reason)]"
         [System.Windows.Forms.Application]::DoEvents()
 
         $result = Copy-SingleItem $item.FullName $dPath $item.Name
 
         if ($result -eq "OK") {
             $copied++
-            $cur = $skippedCount + $copied + $failed
-            $progressBar.Value = $cur
-            Write-Log "OK ($cur/$total) $($item.Name) [$($item.Reason)]"
+            $progressBar.Value = $copied + $failed
+            Write-Log "OK ($num/$totalTodo) $($item.Name)"
         } elseif ($result -eq "STOPPED") {
             break
         } else {
             $failed++
             $failedItems += $item.Name
-            $cur = $skippedCount + $copied + $failed
-            $progressBar.Value = $cur
-            Write-Log "FAIL ($cur/$total) $($item.Name): $result (已重試5次)"
+            $progressBar.Value = $copied + $failed
+            Write-Log "FAIL ($num/$totalTodo) $($item.Name): $result"
         }
     }
 
@@ -332,7 +389,8 @@ $btnStart.Add_Click({
     }
 
     if (-not $script:stopFlag) {
-        Write-Log "完成! 本次複製: $copied | 跳過: $skippedCount | 失敗: $failed | 總共: $total"
+        Write-Log ("-" * 50)
+        Write-Log "完成! 已複製: $copied | 失敗: $failed | 總共: $totalTodo"
         if ($failedItems.Count -gt 0) {
             Write-Log "仍然失敗的項目:"
             foreach ($fn in $failedItems) { Write-Log "  - $fn" }
@@ -341,9 +399,10 @@ $btnStart.Add_Click({
 
     $lblStatus.Text = "完成"
     $lblStatus.ForeColor = [System.Drawing.Color]::Green
-    $btnStart.Enabled = $true
+    $btnScan.Enabled = $true
+    $btnCopy.Enabled = $false
     $btnStop.Enabled = $false
-    $script:copying = $false
+    $script:todoList = @()
 })
 
 # === 啟動 ===
